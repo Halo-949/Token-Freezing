@@ -104,13 +104,16 @@ def evaluate(data_loader, model, device, keep_rate=None):
         target = target.to(device, non_blocking=True)
         a,_,_,_ = images.shape
         cls_attn_reco = torch.zeros(a,12,196).to(device)
+        x_reco = torch.zeros(a, 197, 384).to(device)
 
         # compute output
        # print("engine keep_rate:",keep_rate)
         with torch.cuda.amp.autocast():
-            _, cls_attn_reco_output = model(images, [1]*12, cls_attn_reco)
+            _, cls_attn_reco_output, x_reco_output = model(images, [1]*12, cls_attn_reco, x_reco)
             cls_attn_reco = cls_attn_reco_output
-            output, _ = model(images, keep_rate, cls_attn_reco)
+            x_reco = x_reco_output
+            # cls_attn_reco = torch.zeros(a, 12, 196).to(device)
+            output, _, _ = model(images, keep_rate, cls_attn_reco, x_reco)
             # print("shape of cls_attn_reco=\n", cls_attn_reco.shape)
             loss = criterion(output, target)
 

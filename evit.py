@@ -421,7 +421,7 @@ class EViT(nn.Module):
     def name(self):
         return "EViT"
 
-    def forward_features(self, x, keep_rate=None, cls_attn_reco=None, tokens=None, get_idx=False):
+    def forward_features(self, x, keep_rate=None, cls_attn_reco=None, tokens=None, get_idx=False, x_reco=None):
         _, _, h, w = x.shape
         if not isinstance(keep_rate, (tuple, list)):
             keep_rate = (keep_rate, ) * self.depth
@@ -454,43 +454,30 @@ class EViT(nn.Module):
         left_tokens = []
         idxs = []
         freeze = True # True/False
-        save_data = False  # True/False
+        # save_data = False  # True/False
         defr_flag = False
 
         if freeze is True:
-            # base_rate = 0.7
-            # keep_rate = [1] * 12
-            # keep_rate[3] = base_rate
             defreeze_flag = 0
             get_idx = True
+            defreeze_layer = [8]
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             tokens_before_pruning = x
             b_before, n_before, c_before = x.shape
             ones = torch.ones(b_before, n_before, c_before).to(device)
             zeros = torch.zeros(b_before, n_before, c_before).to(device)
             for i, blk in enumerate(self.blocks):
-                if i in [9] and defreeze_flag == 1:  # defreeze
+                if i in defreeze_layer and defreeze_flag == 1:  # defreeze
+                    # x: 70% remains + 30% defreeze
                     x_unfreeze_tokens = zeros.scatter(dim=1, index=unfreeze_index.unsqueeze(-1).expand(-1, -1, c_before),src=x).to(device)  # [B, left_tokens, C]
                     x = x_unfreeze_tokens + x_freeze_tokens
+                    # x = x_reco  # x:OPT
                     defreeze_flag = 0
-                    # b, n = unfreeze_index.shape
-                    # b1, n1 = freeze_index.shape
-                    # print("defreeze: i=", i, " n_unfreeze_index=", n, " b_unfreeze_index=", b, "\n")
-                    # print("defreeze: i=", i, " n_freeze_index=", n1, " b_freeze_index=", b1, "\n")
-                    if i == 6 and save_data is True:
-                        np.savetxt('./x_unfreeze_tokens.csv', x_unfreeze_tokens.cpu().detach().numpy().reshape(-1, c_before), fmt='%.2f', delimiter=',')
-                        np.savetxt('./x_freeze_tokens.csv', x_freeze_tokens.cpu().detach().numpy().reshape(-1, c_before), fmt='%.2f', delimiter=',')
-                        np.savetxt('./unfreeze_index.csv', unfreeze_index.cpu().detach().numpy(), fmt='%.2f',
-                                   delimiter=',')
-                        np.savetxt('./freeze_index.csv', freeze_index.cpu().detach().numpy(), fmt='%.2f',
-                                   delimiter=',')
-                        np.savetxt('./x.csv', x.cpu().detach().numpy().reshape(-1, c_before), fmt='%.2f',
-                                   delimiter=',')
-                        print("data saved!\n")
-                        sys.exit()
                     cls_attn_reco_in_layer = cls_attn_reco[:, i, :]
                     x, left_token, cls_attn, idx = blk(x, keep_rate[i], cls_attn_reco_in_layer, tokens[i], get_idx,
                                                        defr_flag, unfreeze_index)
+                    # x, left_token, cls_attn, idx = blk(x, 0.09, cls_attn_reco_in_layer, tokens[i], get_idx,
+                    #                                    defr_flag, unfreeze_index)
                     _, n1 = cls_attn.shape
                     _, _, n2 = cls_attn_reco.shape
                     if n1 == n2:
@@ -508,6 +495,7 @@ class EViT(nn.Module):
                 if idx is not None:
                     freeze_index = complement_idx(idx, n_before - 1) + 1  # [B, N-1-left_tokens]
                     x_freeze_masked = zeros.scatter(dim=1, index=freeze_index.unsqueeze(-1).expand(-1, -1, c_before),src=ones).to(device)  # [B, N-1-left_tokens, C]
+                    # x_freeze_tokens = x_freeze_masked * x_reco
                     x_freeze_tokens = x_freeze_masked * tokens_before_pruning
                     cls_idx = torch.zeros(b_before, 1, dtype=idx.dtype, device=idx.device)  # add cls token index: 0
                     unfreeze_index = torch.cat([cls_idx, idx + 1], dim=1)
@@ -516,6 +504,8 @@ class EViT(nn.Module):
                 left_tokens.append(left_token)
                 if idx is not None:
                     idxs.append(idx)
+                if i in defreeze_layer and keep_rate[i] == 1:
+                    x_reco = x
         else:
             for i, blk in enumerate(self.blocks):
                 # x, left_token, idx = blk(x, keep_rate[i], tokens[i], get_idx)
@@ -528,16 +518,16 @@ class EViT(nn.Module):
                     idxs.append(idx)
         x = self.norm(x)
         if self.dist_token is None:
-            return self.pre_logits(x[:, 0]), left_tokens, idxs, cls_attn_reco
+            return self.pre_logits(x[:, 0]), left_tokens, idxs, cls_attn_reco, x_reco
         else:
-            return x[:, 0], x[:, 1], idxs, cls_attn_reco
+            return x[:, 0], x[:, 1], idxs, cls_attn_reco, x_reco
         # if self.dist_token is None:
         #     return self.pre_logits(x[:, 0]), left_tokens, idxs
         # else:
         #     return x[:, 0], x[:, 1], idxs
 
-    def forward(self, x, keep_rate=None, cls_attn_reco=None, tokens=None, get_idx=False):
-        x, _, idxs, cls_att_reco = self.forward_features(x, keep_rate, cls_attn_reco, tokens, get_idx)
+    def forward(self, x, keep_rate=None, cls_attn_reco=None, x_reco=None, tokens=None, get_idx=False):
+        x, _, idxs, cls_att_reco, x_reco_output = self.forward_features(x, keep_rate, cls_attn_reco, tokens, get_idx, x_reco)
         if self.head_dist is not None:
             x, x_dist = self.head(x[0]), self.head_dist(x[1])  # x must be a tuple
             if self.training and not torch.jit.is_scripting():
@@ -548,8 +538,8 @@ class EViT(nn.Module):
         else:
             x = self.head(x)
         if get_idx:
-            return x, idxs, cls_att_reco
-        return x, cls_att_reco
+            return x, idxs, cls_att_reco, x_reco_output
+        return x, cls_att_reco, x_reco_output
         # if get_idx:
         #     return x, idxs
         # return x
@@ -761,7 +751,7 @@ def deit_small_patch16_224(pretrained=False, **kwargs):
 # EViT prototype models
 @register_model
 def deit_small_patch16_shrink_base(pretrained=False, base_keep_rate=0.7, drop_loc=(3, 6, 9), **kwargs):
-    drop_loc = [3 , 9]
+    drop_loc = [3, 9]
     keep_rate = [1] * 12
     for loc in drop_loc:
         keep_rate[loc] = base_keep_rate
