@@ -104,7 +104,7 @@ def evaluate(data_loader, model, device, keep_rate=None):
         target = target.to(device, non_blocking=True)
         a,_,_,_ = images.shape
         cls_attn_reco = torch.zeros(a,12,196).to(device)
-        x_reco = torch.zeros(a, 197, 384).to(device)
+        x_reco = torch.zeros(12, a, 197, 384).to(device)
 
         # compute output
        # print("engine keep_rate:",keep_rate)
@@ -113,6 +113,8 @@ def evaluate(data_loader, model, device, keep_rate=None):
             cls_attn_reco = cls_attn_reco_output
             x_reco = x_reco_output
             # cls_attn_reco = torch.zeros(a, 12, 196).to(device)
+            # defreeze_layer = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+            # keep_rate[defreeze_layer] = 0.3
             output, _, _ = model(images, keep_rate, cls_attn_reco, x_reco)
             # print("shape of cls_attn_reco=\n", cls_attn_reco.shape)
             loss = criterion(output, target)

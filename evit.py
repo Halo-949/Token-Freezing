@@ -457,65 +457,98 @@ class EViT(nn.Module):
         # save_data = False  # True/False
         defr_flag = False
 
-        if freeze is True:
-            defreeze_flag = 0
-            get_idx = True
-            defreeze_layer = [8]
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            tokens_before_pruning = x
-            b_before, n_before, c_before = x.shape
-            ones = torch.ones(b_before, n_before, c_before).to(device)
-            zeros = torch.zeros(b_before, n_before, c_before).to(device)
+        # if freeze is True:
+        #     defreeze_flag = 0
+        #     get_idx = True
+        #     defreeze_layer = [8]
+        #     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        #     tokens_before_pruning = x
+        #     b_before, n_before, c_before = x.shape
+        #     ones = torch.ones(b_before, n_before, c_before).to(device)
+        #     zeros = torch.zeros(b_before, n_before, c_before).to(device)
+        #     for i, blk in enumerate(self.blocks):
+        #         if i in defreeze_layer and defreeze_flag == 1:  # defreeze
+        #             # x: 70% remains + 30% defreeze
+        #             x_unfreeze_tokens = zeros.scatter(dim=1, index=unfreeze_index.unsqueeze(-1).expand(-1, -1, c_before),src=x).to(device)  # [B, left_tokens, C]
+        #             x = x_unfreeze_tokens + x_freeze_tokens
+        #             # x = x_reco  # x:OPT
+        #             defreeze_flag = 0
+        #             cls_attn_reco_in_layer = cls_attn_reco[:, i, :]
+        #             x, left_token, cls_attn, idx = blk(x, keep_rate[i], cls_attn_reco_in_layer, tokens[i], get_idx,
+        #                                                defr_flag, unfreeze_index)
+        #             # x, left_token, cls_attn, idx = blk(x, 0.09, cls_attn_reco_in_layer, tokens[i], get_idx,
+        #             #                                    defr_flag, unfreeze_index)
+        #             _, n1 = cls_attn.shape
+        #             _, _, n2 = cls_attn_reco.shape
+        #             if n1 == n2:
+        #                 cls_attn_reco[:, i, :] = cls_attn
+        #         else:
+        #             # x, left_token, idx = blk(x, keep_rate[i], tokens[i], get_idx)
+        #             cls_attn_reco_in_layer = cls_attn_reco[:,i,:]
+        #             x, left_token, cls_attn, idx = blk(x, keep_rate[i], cls_attn_reco_in_layer, tokens[i], get_idx)
+        #             _,n1 = cls_attn.shape
+        #             _,_,n2 = cls_attn_reco.shape
+        #             if n1==n2:
+        #                 cls_attn_reco[:,i,:] = cls_attn
+        #             # print("i=",i,"shape of cls_attn_reco=\n",cls_attn_reco.shape)
+        #             # (if pruning then freeze)
+        #         if idx is not None:
+        #             freeze_index = complement_idx(idx, n_before - 1) + 1  # [B, N-1-left_tokens]
+        #             x_freeze_masked = zeros.scatter(dim=1, index=freeze_index.unsqueeze(-1).expand(-1, -1, c_before),src=ones).to(device)  # [B, N-1-left_tokens, C]
+        #             # x_freeze_tokens = x_freeze_masked * x_reco
+        #             x_freeze_tokens = x_freeze_masked * tokens_before_pruning
+        #             cls_idx = torch.zeros(b_before, 1, dtype=idx.dtype, device=idx.device)  # add cls token index: 0
+        #             unfreeze_index = torch.cat([cls_idx, idx + 1], dim=1)
+        #             # unfreeze_index = idx
+        #             defreeze_flag = 1
+        #         left_tokens.append(left_token)
+        #         if idx is not None:
+        #             idxs.append(idx)
+        #         if i in defreeze_layer and keep_rate[i] == 1:
+        #             x_reco = x
+        # else:
+        #     for i, blk in enumerate(self.blocks):
+        #         # x, left_token, idx = blk(x, keep_rate[i], tokens[i], get_idx)
+        #         cls_attn_reco_in_layer = cls_attn_reco[:, i, :]
+        #         x, left_token, cls_attn, idx = blk(x, keep_rate[i], cls_attn_reco_in_layer, tokens[i], get_idx,
+        #                                            defr_flag)
+        #         # print("i=",i, "tokens:",tokens[i],"\n")
+        #         left_tokens.append(left_token)
+        #         if idx is not None:
+        #             idxs.append(idx)
+
+
+        ### skip test
+        skip = True
+        pruning_layer = []
+        use_OPT = True
+        if skip is True:
             for i, blk in enumerate(self.blocks):
-                if i in defreeze_layer and defreeze_flag == 1:  # defreeze
-                    # x: 70% remains + 30% defreeze
-                    x_unfreeze_tokens = zeros.scatter(dim=1, index=unfreeze_index.unsqueeze(-1).expand(-1, -1, c_before),src=x).to(device)  # [B, left_tokens, C]
-                    x = x_unfreeze_tokens + x_freeze_tokens
-                    # x = x_reco  # x:OPT
-                    defreeze_flag = 0
-                    cls_attn_reco_in_layer = cls_attn_reco[:, i, :]
-                    x, left_token, cls_attn, idx = blk(x, keep_rate[i], cls_attn_reco_in_layer, tokens[i], get_idx,
-                                                       defr_flag, unfreeze_index)
-                    # x, left_token, cls_attn, idx = blk(x, 0.09, cls_attn_reco_in_layer, tokens[i], get_idx,
-                    #                                    defr_flag, unfreeze_index)
-                    _, n1 = cls_attn.shape
-                    _, _, n2 = cls_attn_reco.shape
-                    if n1 == n2:
-                        cls_attn_reco[:, i, :] = cls_attn
-                else:
-                    # x, left_token, idx = blk(x, keep_rate[i], tokens[i], get_idx)
-                    cls_attn_reco_in_layer = cls_attn_reco[:,i,:]
-                    x, left_token, cls_attn, idx = blk(x, keep_rate[i], cls_attn_reco_in_layer, tokens[i], get_idx)
-                    _,n1 = cls_attn.shape
-                    _,_,n2 = cls_attn_reco.shape
-                    if n1==n2:
-                        cls_attn_reco[:,i,:] = cls_attn
-                    # print("i=",i,"shape of cls_attn_reco=\n",cls_attn_reco.shape)
-                    # (if pruning then freeze)
-                if idx is not None:
-                    freeze_index = complement_idx(idx, n_before - 1) + 1  # [B, N-1-left_tokens]
-                    x_freeze_masked = zeros.scatter(dim=1, index=freeze_index.unsqueeze(-1).expand(-1, -1, c_before),src=ones).to(device)  # [B, N-1-left_tokens, C]
-                    # x_freeze_tokens = x_freeze_masked * x_reco
-                    x_freeze_tokens = x_freeze_masked * tokens_before_pruning
-                    cls_idx = torch.zeros(b_before, 1, dtype=idx.dtype, device=idx.device)  # add cls token index: 0
-                    unfreeze_index = torch.cat([cls_idx, idx + 1], dim=1)
-                    # unfreeze_index = idx
-                    defreeze_flag = 1
+                if i in pruning_layer:
+                    keep_rate[i] = keep_rate[i] * 0.3
+                # x, left_token, idx = blk(x, keep_rate[i], tokens[i], get_idx)
+                if use_OPT is True:
+                    x = x_reco[i,:]
+                cls_attn_reco_in_layer = cls_attn_reco[:, i, :]
+                x, left_token, cls_attn, idx = blk(x, keep_rate[i], cls_attn_reco_in_layer, tokens[i], get_idx,
+                                                   defr_flag)
                 left_tokens.append(left_token)
                 if idx is not None:
                     idxs.append(idx)
-                if i in defreeze_layer and keep_rate[i] == 1:
-                    x_reco = x
+                if keep_rate[i] == 1:
+                    x_reco[i,:] = x
+                    cls_attn_reco[:, i, :] = cls_attn
         else:
             for i, blk in enumerate(self.blocks):
                 # x, left_token, idx = blk(x, keep_rate[i], tokens[i], get_idx)
                 cls_attn_reco_in_layer = cls_attn_reco[:, i, :]
                 x, left_token, cls_attn, idx = blk(x, keep_rate[i], cls_attn_reco_in_layer, tokens[i], get_idx,
                                                    defr_flag)
-                # print("i=",i, "tokens:",tokens[i],"\n")
                 left_tokens.append(left_token)
                 if idx is not None:
                     idxs.append(idx)
+
+
         x = self.norm(x)
         if self.dist_token is None:
             return self.pre_logits(x[:, 0]), left_tokens, idxs, cls_attn_reco, x_reco
