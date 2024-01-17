@@ -109,13 +109,10 @@ def evaluate(data_loader, model, device, keep_rate=None):
         # compute output
        # print("engine keep_rate:",keep_rate)
         with torch.cuda.amp.autocast():
-            _, cls_attn_reco_output, x_reco_output = model(images, [1]*12, cls_attn_reco, x_reco)
+            _, cls_attn_reco_output, x_reco_output = model(images, [1]*12, cls_attn_reco, x_reco, True)
             cls_attn_reco = cls_attn_reco_output
             x_reco = x_reco_output
-            # cls_attn_reco = torch.zeros(a, 12, 196).to(device)
-            # defreeze_layer = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
-            # keep_rate[defreeze_layer] = 0.3
-            output, _, _ = model(images, keep_rate, cls_attn_reco, x_reco)
+            output, _, _ = model(images, keep_rate, cls_attn_reco, x_reco, False)
             # print("shape of cls_attn_reco=\n", cls_attn_reco.shape)
             loss = criterion(output, target)
 

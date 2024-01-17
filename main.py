@@ -281,7 +281,8 @@ def main(args):
         fuse_token=args.fuse_token,
         img_size=(args.input_size, args.input_size)
     )
-   # print("model keep_rate",model.keep_rate)
+
+    # print("model keep_rate",model.keep_rate)
 
     if args.finetune:
         if args.finetune.startswith('https'):
