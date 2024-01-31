@@ -270,23 +270,29 @@ class Block(nn.Module):
             keep_rate = self.keep_rate  # this is for inference, use the default keep rate
         B, N, C = x.shape
 
-        tmp, index, idx, cls_attn, left_tokens = self.attn(self.norm1(x), keep_rate, tokens, cls_attn_reco_in_layer, defr_flag, unfreeze_index)
-        x = x + self.drop_path(tmp)
+        skip_MHSA = False
+        if skip_MHSA is True:
+            tmp, index, idx, cls_attn, left_tokens = self.attn(self.norm1(x), keep_rate, tokens, cls_attn_reco_in_layer, defr_flag, unfreeze_index)
+            x = x + self.drop_path(tmp)
+        else:
+            tmp, index, idx, cls_attn, left_tokens = self.attn(self.norm1(x), keep_rate, tokens, cls_attn_reco_in_layer,
+                                                               defr_flag, unfreeze_index)
+            x = x + self.drop_path(tmp)
 
-        if index is not None:
-            # B, N, C = x.shape
-            non_cls = x[:, 1:]
-            x_others = torch.gather(non_cls, dim=1, index=index)  # [B, left_tokens, C]
+            if index is not None:
+                # B, N, C = x.shape
+                non_cls = x[:, 1:]
+                x_others = torch.gather(non_cls, dim=1, index=index)  # [B, left_tokens, C]
 
-            if self.fuse_token:
-                compl = complement_idx(idx, N - 1)  # [B, N-1-left_tokens]
-                non_topk = torch.gather(non_cls, dim=1, index=compl.unsqueeze(-1).expand(-1, -1, C))  # [B, N-1-left_tokens, C]
+                if self.fuse_token:
+                    compl = complement_idx(idx, N - 1)  # [B, N-1-left_tokens]
+                    non_topk = torch.gather(non_cls, dim=1, index=compl.unsqueeze(-1).expand(-1, -1, C))  # [B, N-1-left_tokens, C]
 
-                non_topk_attn = torch.gather(cls_attn, dim=1, index=compl)  # [B, N-1-left_tokens]
-                extra_token = torch.sum(non_topk * non_topk_attn.unsqueeze(-1), dim=1, keepdim=True)  # [B, 1, C]
-                x = torch.cat([x[:, 0:1], x_others, extra_token], dim=1)
-            else:
-                x = torch.cat([x[:, 0:1], x_others], dim=1)
+                    non_topk_attn = torch.gather(cls_attn, dim=1, index=compl)  # [B, N-1-left_tokens]
+                    extra_token = torch.sum(non_topk * non_topk_attn.unsqueeze(-1), dim=1, keepdim=True)  # [B, 1, C]
+                    x = torch.cat([x[:, 0:1], x_others, extra_token], dim=1)
+                else:
+                    x = torch.cat([x[:, 0:1], x_others], dim=1)
 
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         n_tokens = x.shape[1] - 1
@@ -594,8 +600,67 @@ class EViT(nn.Module):
         # else:
         #     return x[:, 0], x[:, 1], idxs
 
+    def forward_x(self, x, keep_rate=None, cls_attn_reco=None, Reco_run=False, tokens=None, get_idx=False, x_reco=None):
+        _, _, h, w = x.shape
+        if not isinstance(keep_rate, (tuple, list)):
+            keep_rate = (keep_rate, ) * self.depth
+        if not isinstance(tokens, (tuple, list)):
+            tokens = (tokens, ) * self.depth
+        assert len(keep_rate) == self.depth
+        assert len(tokens) == self.depth
+        x = self.patch_embed(x)
+        cls_token = self.cls_token.expand(x.shape[0], -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
+        if self.dist_token is None:
+            x = torch.cat((cls_token, x), dim=1)
+        else:
+            x = torch.cat((cls_token, self.dist_token.expand(x.shape[0], -1, -1), x), dim=1)
+
+        # for input with another resolution, interpolate the positional embedding.
+        # used for finetining a ViT on images with larger size.
+        pos_embed = self.pos_embed
+        if x.shape[1] != pos_embed.shape[1]:
+            assert h == w  # for simplicity assume h == w
+            real_pos = pos_embed[:, self.num_tokens:]
+            hw = int(math.sqrt(real_pos.shape[1]))
+            true_hw = int(math.sqrt(x.shape[1] - self.num_tokens))
+            real_pos = real_pos.transpose(1, 2).reshape(1, self.embed_dim, hw, hw)
+            new_pos = F.interpolate(real_pos, size=true_hw, mode='bicubic', align_corners=False)
+            new_pos = new_pos.reshape(1, self.embed_dim, -1).transpose(1, 2)
+            pos_embed = torch.cat([pos_embed[:, :self.num_tokens], new_pos], dim=1)
+
+        x = self.pos_drop(x + pos_embed)
+
+        left_tokens = []
+        idxs = []
+        defr_flag = False
+        ### skip test
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        b_before, n_before, c_before = x.shape
+        for i, blk in enumerate(self.blocks):
+            # x, left_token, idx = blk(x, keep_rate[i], tokens[i], get_idx)
+            if Reco_run is True:
+                cls_attn_reco_in_layer = cls_attn_reco[:, i, :]
+            else:
+                cls_attn_reco_in_layer = torch.zeros(b_before, 196).to(device)
+            x, left_token, cls_attn, idx = blk(x, keep_rate[i], cls_attn_reco_in_layer, tokens[i], get_idx,
+                                               defr_flag)
+            left_tokens.append(left_token)
+            if Reco_run is True:
+                x_reco[i, :] = x
+                cls_attn_reco[:, i, :] = cls_attn
+            if idx is not None:
+                idxs.append(idx)
+        x = self.norm(x)
+        if self.dist_token is None:
+            return self.pre_logits(x[:, 0]), left_tokens, idxs, cls_attn_reco, x_reco
+        else:
+            return x[:, 0], x[:, 1], idxs, cls_attn_reco, x_reco
+
     def forward(self, x, keep_rate=None, cls_attn_reco=None, x_reco=None, Reco_run=False, tokens=None, get_idx=False):
-        x, _, idxs, cls_att_reco, x_reco_output = self.forward_features(x, keep_rate, cls_attn_reco, Reco_run, tokens, get_idx, x_reco)
+        # x, _, idxs, cls_att_reco, x_reco_output = self.forward_features(x, keep_rate, cls_attn_reco, Reco_run, tokens, get_idx, x_reco)
+
+        x, _, idxs, cls_att_reco, x_reco_output = self.forward_x(x, keep_rate, cls_attn_reco, Reco_run, tokens,
+                                                                        get_idx, x_reco)
         if self.head_dist is not None:
             x, x_dist = self.head(x[0]), self.head_dist(x[1])  # x must be a tuple
             if self.training and not torch.jit.is_scripting():
@@ -820,7 +885,7 @@ def deit_small_patch16_224(pretrained=False, **kwargs):
 @register_model
 def deit_small_patch16_shrink_base(pretrained=False, base_keep_rate=0.7, drop_loc=(3, 6, 9), **kwargs):
     keep_rate = [1] * 12
-    skip = True
+    skip = False
     if skip is True:
         # drop_loc = [1, 4, 7, 10]
         # drop_loc = [1, 3, 5, 7, 9, 11]
