@@ -112,6 +112,7 @@ def evaluate(data_loader, model, device, keep_rate=None):
             _, cls_attn_reco_output, x_reco_output = model(images, [1]*12, cls_attn_reco, x_reco, True)
             cls_attn_reco = cls_attn_reco_output
             x_reco = x_reco_output
+            # cls_attn_reco = torch.zeros(a, 12, 196).to(device)   # for evit
             output, _, _ = model(images, keep_rate, cls_attn_reco, x_reco, False)
             # print("shape of cls_attn_reco=\n", cls_attn_reco.shape)
             loss = criterion(output, target)

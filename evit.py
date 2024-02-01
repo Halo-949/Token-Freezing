@@ -220,10 +220,10 @@ class Attention(nn.Module):
             cls_attn = attn[:, :, 0, 1:]  # [B, H, N-1]
             cls_attn = cls_attn.mean(dim=1)  # [B, N-1]
 
-            if torch.sum(cls_attn_reco_in_layer) == 0:
-                cls_attn = cls_attn
-            else:
-                cls_attn = cls_attn_reco_in_layer
+            # if torch.sum(cls_attn_reco_in_layer) == 0:
+            #     cls_attn = cls_attn
+            # else:
+            #     cls_attn = cls_attn_reco_in_layer
 
             _, idx = torch.topk(cls_attn, left_tokens, dim=1, largest=True, sorted=True)  # [B, left_tokens]
 
@@ -265,18 +265,51 @@ class Block(nn.Module):
         self.mlp_hidden_dim = mlp_hidden_dim
         self.fuse_token = fuse_token
 
-    def forward(self, x, keep_rate=None, cls_attn_reco_in_layer=None, tokens=None, get_idx=False, defr_flag = True, unfreeze_index=None):
+    def forward(self, x, keep_rate=None, tokens=None, get_idx=False, defr_flag = True, cls_attn_reco_in_layer=None):
         if keep_rate is None:
             keep_rate = self.keep_rate  # this is for inference, use the default keep rate
         B, N, C = x.shape
 
-        skip_MHSA = False
+        skip_MHSA = True
         if skip_MHSA is True:
-            tmp, index, idx, cls_attn, left_tokens = self.attn(self.norm1(x), keep_rate, tokens, cls_attn_reco_in_layer, defr_flag, unfreeze_index)
-            x = x + self.drop_path(tmp)
+            if cls_attn_reco_in_layer is None:
+                tmp, index, idx, cls_attn, left_tokens = self.attn(self.norm1(x), keep_rate, tokens,
+                                                                   cls_attn_reco_in_layer, defr_flag)
+                x = x + self.drop_path(tmp)
+            else:   # skip MHSA
+                left_tokens = N - 1
+                ZERO = torch.zeros(B, N, C).to(x.device)
+                if self.keep_rate < 1 and keep_rate < 1 or tokens is not None:  # double check the keep rate
+                    left_tokens = math.ceil(keep_rate * (N - 1))
+                    if tokens is not None:
+                        left_tokens = tokens
+                _, idx = torch.topk(cls_attn_reco_in_layer, left_tokens, dim=1, largest=True, sorted=True)  # [B, left_tokens]
+                index = idx.unsqueeze(-1).expand(-1, -1, C)  # [B, left_tokens, C]
+                # record skip tokens
+                skip_idx = complement_idx(idx, N - 1) + 1  # [B, N-1-left_tokens]
+                x_skip_tokens = ZERO.scatter(dim=1,
+                                              index=skip_idx.unsqueeze(-1).expand(-1, -1, C),
+                                              src=x).to(x.device)  # [B, N-1-left_tokens, C]
+                # Temp pruning
+                non_cls = x[:, 1:]
+                x_others = torch.gather(non_cls, dim=1, index=index)  # [B, left_tokens, C]
+                x = torch.cat([x[:, 0:1], x_others], dim=1)
+                cls_idx = torch.zeros(B, 1, dtype=idx.dtype, device=idx.device)  # add cls token index: 0
+                left_idx = torch.cat([cls_idx, idx + 1], dim=1)
+
+                tmp, index, idx, cls_attn, left_tokens = self.attn(self.norm1(x), 1, tokens,
+                                                                   cls_attn_reco_in_layer, defr_flag)
+                tmp = self.drop_path(tmp)
+                ZERO2 = torch.zeros(B, N, C, dtype=tmp.dtype, device=tmp.device)
+                x_left_tokens = ZERO2.scatter(dim=1,
+                                              index=left_idx.unsqueeze(-1).expand(-1, -1, C),
+                                              src=tmp).to(tmp.device)  # [B, left_tokens, C]
+                x = x_skip_tokens + x_left_tokens
+                index = None
+
         else:
             tmp, index, idx, cls_attn, left_tokens = self.attn(self.norm1(x), keep_rate, tokens, cls_attn_reco_in_layer,
-                                                               defr_flag, unfreeze_index)
+                                                               defr_flag)
             x = x + self.drop_path(tmp)
 
             if index is not None:
@@ -638,12 +671,13 @@ class EViT(nn.Module):
         b_before, n_before, c_before = x.shape
         for i, blk in enumerate(self.blocks):
             # x, left_token, idx = blk(x, keep_rate[i], tokens[i], get_idx)
-            if Reco_run is True:
+            if Reco_run is False:
                 cls_attn_reco_in_layer = cls_attn_reco[:, i, :]
+                x, left_token, cls_attn, idx = blk(x, keep_rate[i], tokens[i], get_idx,
+                                               defr_flag, cls_attn_reco_in_layer)
             else:
-                cls_attn_reco_in_layer = torch.zeros(b_before, 196).to(device)
-            x, left_token, cls_attn, idx = blk(x, keep_rate[i], cls_attn_reco_in_layer, tokens[i], get_idx,
-                                               defr_flag)
+                x, left_token, cls_attn, idx = blk(x, keep_rate[i], tokens[i], get_idx,
+                                                   defr_flag)
             left_tokens.append(left_token)
             if Reco_run is True:
                 x_reco[i, :] = x
@@ -885,7 +919,7 @@ def deit_small_patch16_224(pretrained=False, **kwargs):
 @register_model
 def deit_small_patch16_shrink_base(pretrained=False, base_keep_rate=0.7, drop_loc=(3, 6, 9), **kwargs):
     keep_rate = [1] * 12
-    skip = False
+    skip = True
     if skip is True:
         # drop_loc = [1, 4, 7, 10]
         # drop_loc = [1, 3, 5, 7, 9, 11]
