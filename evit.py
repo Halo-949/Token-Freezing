@@ -190,7 +190,7 @@ class Attention(nn.Module):
         self.keep_rate = keep_rate
         assert 0 < keep_rate <= 1, "keep_rate must > 0 and <= 1, got {0}".format(keep_rate)
 
-    def forward(self, x, keep_rate=None, tokens=None, cls_attn_reco_in_layer=None, defr_flag=True, unfreeze_index=None):
+    def forward(self, x, keep_rate=None, tokens=None, defr_flag=True, unfreeze_index=None):
         if keep_rate is None:
             keep_rate = self.keep_rate
         B, N, C = x.shape
@@ -265,54 +265,81 @@ class Block(nn.Module):
         self.mlp_hidden_dim = mlp_hidden_dim
         self.fuse_token = fuse_token
 
-    def forward(self, x, keep_rate=None, tokens=None, get_idx=False, defr_flag = True, cls_attn_reco_in_layer=None):
+    def forward(self, x, keep_rate=None, tokens=None, get_idx=False, defr_flag=True, cls_attn_reco_in_layer=None):
         if keep_rate is None:
             keep_rate = self.keep_rate  # this is for inference, use the default keep rate
         B, N, C = x.shape
 
         skip_MHSA = True
+        save_data = False
         if skip_MHSA is True:
             if cls_attn_reco_in_layer is None:
                 tmp, index, idx, cls_attn, left_tokens = self.attn(self.norm1(x), keep_rate, tokens,
-                                                                   cls_attn_reco_in_layer, defr_flag)
+                                                                defr_flag)
                 x = x + self.drop_path(tmp)
             else:   # skip MHSA
                 left_tokens = N - 1
+                x_before = x
                 ZERO = torch.zeros(B, N, C).to(x.device)
+                ONE = torch.ones(B, N, C).to(x.device)
                 if self.keep_rate < 1 and keep_rate < 1 or tokens is not None:  # double check the keep rate
                     left_tokens = math.ceil(keep_rate * (N - 1))
                     if tokens is not None:
                         left_tokens = tokens
-                _, idx = torch.topk(cls_attn_reco_in_layer, left_tokens, dim=1, largest=True, sorted=True)  # [B, left_tokens]
-                index = idx.unsqueeze(-1).expand(-1, -1, C)  # [B, left_tokens, C]
-                # record skip tokens
-                skip_idx = complement_idx(idx, N - 1) + 1  # [B, N-1-left_tokens]
-                x_skip_tokens = ZERO.scatter(dim=1,
-                                              index=skip_idx.unsqueeze(-1).expand(-1, -1, C),
-                                              src=x).to(x.device)  # [B, N-1-left_tokens, C]
-                # Temp pruning
-                non_cls = x[:, 1:]
-                x_others = torch.gather(non_cls, dim=1, index=index)  # [B, left_tokens, C]
-                x = torch.cat([x[:, 0:1], x_others], dim=1)
-                cls_idx = torch.zeros(B, 1, dtype=idx.dtype, device=idx.device)  # add cls token index: 0
-                left_idx = torch.cat([cls_idx, idx + 1], dim=1)
+                if left_tokens < N - 1:
+                    _, idx = torch.topk(cls_attn_reco_in_layer, left_tokens, dim=1, largest=True, sorted=True)  # [B, left_tokens]
+                    index = idx.unsqueeze(-1).expand(-1, -1, C)  # [B, left_tokens, C]
+                    # record skip tokens
+                    skip_idx = complement_idx(idx, N - 1) + 1  # [B, N-1-left_tokens]
+                    if left_tokens < N - 1 and save_data is True:
+                        np.savetxt('./x_before_skip.csv', x.cpu().detach().numpy().reshape(-1, C), fmt='%.2f', delimiter=',')
+                    x_skip_mask = ZERO.scatter(dim=1,
+                                                  index=skip_idx.unsqueeze(-1).expand(-1, -1, C),
+                                                  src=ONE).to(x.device)  # [B, N, C]
+                    x_skip_tokens = x_skip_mask * x_before
 
-                tmp, index, idx, cls_attn, left_tokens = self.attn(self.norm1(x), 1, tokens,
-                                                                   cls_attn_reco_in_layer, defr_flag)
+                    # Temp pruning
+                    non_cls = x[:, 1:]
+                    x_others = torch.gather(non_cls, dim=1, index=index)  # [B, left_tokens, C]
+                    x = torch.cat([x[:, 0:1], x_others], dim=1)
+                    if left_tokens < N - 1 and save_data is True:
+                        np.savetxt('./x_after_pruning.csv', x.cpu().detach().numpy().reshape(-1, C), fmt='%.2f',
+                                   delimiter=',')
+                    cls_idx = torch.zeros(B, 1, dtype=idx.dtype, device=idx.device)  # add cls token index: 0
+                    left_idx = torch.cat([cls_idx, idx + 1], dim=1)
+
+                tmp, _, _, cls_attn, _ = self.attn(self.norm1(x), 1, tokens,
+                                                                defr_flag)
                 tmp = self.drop_path(tmp)
-                ZERO2 = torch.zeros(B, N, C, dtype=tmp.dtype, device=tmp.device)
-                x_left_tokens = ZERO2.scatter(dim=1,
-                                              index=left_idx.unsqueeze(-1).expand(-1, -1, C),
-                                              src=tmp).to(tmp.device)  # [B, left_tokens, C]
-                x = x_skip_tokens + x_left_tokens
-                index = None
+
+                if left_tokens < N - 1:
+                    zero2 = torch.zeros(B, N, C, dtype=tmp.dtype, device=tmp.device)
+                    x_left_tokens = zero2.scatter(dim=1,
+                                                  index=left_idx.unsqueeze(-1).expand(-1, -1, C),
+                                                  src=tmp).to(tmp.device)  # [B, left_tokens, C]
+                    x = x_skip_tokens + x_left_tokens
+                else:
+                    x = x + tmp
+
+                if left_tokens < N-1 and save_data is True:
+                    np.savetxt('./x_skip_tokens.csv', x_skip_tokens.cpu().detach().numpy().reshape(-1,C), fmt='%.2f', delimiter=',')
+                    np.savetxt('./x_left_tokens.csv', x_left_tokens.cpu().detach().numpy().reshape(-1,C), fmt='%.2f', delimiter=',')
+                    np.savetxt('./skip_idx.csv', skip_idx.cpu().detach().numpy(), fmt='%.2f', delimiter=',')
+                    np.savetxt('./left_idx.csv', left_idx.cpu().detach().numpy(), fmt='%.2f', delimiter=',')
+                    np.savetxt('./x.csv', x.cpu().detach().numpy().reshape(-1,C), fmt='%.2f', delimiter=',')
+                    np.savetxt('./x_tmp.csv', tmp.cpu().detach().numpy().reshape(-1, C), fmt='%.2f', delimiter=',')
+                    save_data is False
+                    sys.exit(0)
 
         else:
-            tmp, index, idx, cls_attn, left_tokens = self.attn(self.norm1(x), keep_rate, tokens, cls_attn_reco_in_layer,
-                                                               defr_flag)
+            tmp, index, idx, cls_attn, left_tokens = self.attn(self.norm1(x), keep_rate, tokens, defr_flag)
             x = x + self.drop_path(tmp)
 
             if index is not None:
+                # if left_tokens < N-1 and save_data is True:
+                #     np.savetxt('./x2.csv', x.cpu().detach().numpy().reshape(-1,C), fmt='%.2f', delimiter=',')
+                #     save_data is False
+                #     sys.exit(0)
                 # B, N, C = x.shape
                 non_cls = x[:, 1:]
                 x_others = torch.gather(non_cls, dim=1, index=index)  # [B, left_tokens, C]
@@ -633,7 +660,7 @@ class EViT(nn.Module):
         # else:
         #     return x[:, 0], x[:, 1], idxs
 
-    def forward_x(self, x, keep_rate=None, cls_attn_reco=None, Reco_run=False, tokens=None, get_idx=False, x_reco=None):
+    def forward_x(self, x, keep_rate=None, cls_attn_reco=None, Reco_run=False, tokens=None, get_idx=False):
         _, _, h, w = x.shape
         if not isinstance(keep_rate, (tuple, list)):
             keep_rate = (keep_rate, ) * self.depth
@@ -667,8 +694,6 @@ class EViT(nn.Module):
         idxs = []
         defr_flag = False
         ### skip test
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        b_before, n_before, c_before = x.shape
         for i, blk in enumerate(self.blocks):
             # x, left_token, idx = blk(x, keep_rate[i], tokens[i], get_idx)
             if Reco_run is False:
@@ -680,21 +705,20 @@ class EViT(nn.Module):
                                                    defr_flag)
             left_tokens.append(left_token)
             if Reco_run is True:
-                x_reco[i, :] = x
                 cls_attn_reco[:, i, :] = cls_attn
             if idx is not None:
                 idxs.append(idx)
         x = self.norm(x)
         if self.dist_token is None:
-            return self.pre_logits(x[:, 0]), left_tokens, idxs, cls_attn_reco, x_reco
+            return self.pre_logits(x[:, 0]), left_tokens, idxs, cls_attn_reco
         else:
-            return x[:, 0], x[:, 1], idxs, cls_attn_reco, x_reco
+            return x[:, 0], x[:, 1], idxs, cls_attn_reco
 
     def forward(self, x, keep_rate=None, cls_attn_reco=None, x_reco=None, Reco_run=False, tokens=None, get_idx=False):
         # x, _, idxs, cls_att_reco, x_reco_output = self.forward_features(x, keep_rate, cls_attn_reco, Reco_run, tokens, get_idx, x_reco)
 
-        x, _, idxs, cls_att_reco, x_reco_output = self.forward_x(x, keep_rate, cls_attn_reco, Reco_run, tokens,
-                                                                        get_idx, x_reco)
+        x, _, idxs, cls_att_reco = self.forward_x(x, keep_rate, cls_attn_reco, Reco_run, tokens,
+                                                                        get_idx)
         if self.head_dist is not None:
             x, x_dist = self.head(x[0]), self.head_dist(x[1])  # x must be a tuple
             if self.training and not torch.jit.is_scripting():
@@ -705,8 +729,8 @@ class EViT(nn.Module):
         else:
             x = self.head(x)
         if get_idx:
-            return x, idxs, cls_att_reco, x_reco_output
-        return x, cls_att_reco, x_reco_output
+            return x, idxs, cls_att_reco, x_reco
+        return x, cls_att_reco, x_reco
         # if get_idx:
         #     return x, idxs
         # return x
@@ -919,7 +943,7 @@ def deit_small_patch16_224(pretrained=False, **kwargs):
 @register_model
 def deit_small_patch16_shrink_base(pretrained=False, base_keep_rate=0.7, drop_loc=(3, 6, 9), **kwargs):
     keep_rate = [1] * 12
-    skip = True
+    skip = False
     if skip is True:
         # drop_loc = [1, 4, 7, 10]
         # drop_loc = [1, 3, 5, 7, 9, 11]
