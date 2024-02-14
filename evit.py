@@ -291,8 +291,6 @@ class Block(nn.Module):
                     index = idx.unsqueeze(-1).expand(-1, -1, C)  # [B, left_tokens, C]
                     # record skip tokens
                     skip_idx = complement_idx(idx, N - 1) + 1  # [B, N-1-left_tokens]
-                    if left_tokens < N - 1 and save_data is True:
-                        np.savetxt('./x_before_skip.csv', x.cpu().detach().numpy().reshape(-1, C), fmt='%.2f', delimiter=',')
                     x_skip_mask = ZERO.scatter(dim=1,
                                                   index=skip_idx.unsqueeze(-1).expand(-1, -1, C),
                                                   src=ONE).to(x.device)  # [B, N, C]
@@ -302,13 +300,10 @@ class Block(nn.Module):
                     non_cls = x[:, 1:]
                     x_others = torch.gather(non_cls, dim=1, index=index)  # [B, left_tokens, C]
                     x = torch.cat([x[:, 0:1], x_others], dim=1)
-                    if left_tokens < N - 1 and save_data is True:
-                        np.savetxt('./x_after_pruning.csv', x.cpu().detach().numpy().reshape(-1, C), fmt='%.2f',
-                                   delimiter=',')
                     cls_idx = torch.zeros(B, 1, dtype=idx.dtype, device=idx.device)  # add cls token index: 0
                     left_idx = torch.cat([cls_idx, idx + 1], dim=1)
 
-                tmp, _, _, cls_attn, _ = self.attn(self.norm1(x), 1, tokens,
+                tmp, _, _, cls_attn, _ = self.attn(self.norm1(x), keep_rate, tokens,
                                                                 defr_flag)
                 tmp = self.drop_path(tmp)
 
@@ -320,16 +315,6 @@ class Block(nn.Module):
                     x = x_skip_tokens + x_left_tokens
                 else:
                     x = x + tmp
-
-                if left_tokens < N-1 and save_data is True:
-                    np.savetxt('./x_skip_tokens.csv', x_skip_tokens.cpu().detach().numpy().reshape(-1,C), fmt='%.2f', delimiter=',')
-                    np.savetxt('./x_left_tokens.csv', x_left_tokens.cpu().detach().numpy().reshape(-1,C), fmt='%.2f', delimiter=',')
-                    np.savetxt('./skip_idx.csv', skip_idx.cpu().detach().numpy(), fmt='%.2f', delimiter=',')
-                    np.savetxt('./left_idx.csv', left_idx.cpu().detach().numpy(), fmt='%.2f', delimiter=',')
-                    np.savetxt('./x.csv', x.cpu().detach().numpy().reshape(-1,C), fmt='%.2f', delimiter=',')
-                    np.savetxt('./x_tmp.csv', tmp.cpu().detach().numpy().reshape(-1, C), fmt='%.2f', delimiter=',')
-                    save_data is False
-                    sys.exit(0)
 
         else:
             tmp, index, idx, cls_attn, left_tokens = self.attn(self.norm1(x), keep_rate, tokens, defr_flag)
